@@ -4,7 +4,7 @@ TARGET = shellite
 
 all: $(TARGET)
 $(TARGET): main.c
-	$(CC) $(CFLAGS) -o $(TARGET) main.c
+	$(CC) $(CFLAGS) main.c
 
 clean:
 	rm -f $(TARGET)
