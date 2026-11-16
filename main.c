@@ -9,6 +9,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define MAX_COMMANDS 16
+#define MAX_ARGS 128
 
 // detect and run built in commands like exit or cd which shellite must handle itself
 // this means that they should not be run by a child process but rather by the parent itself
@@ -27,7 +29,7 @@ int run_builtin(char **args){
         }
 
         if(path == NULL){
-            fprintf(stderr, "cd: HOME is not set\n");
+            printf("cd: HOME is not set\n");
         }else if(chdir(path) == -1){
             perror("cd");
         }
@@ -41,12 +43,11 @@ int main(){
     char *line = NULL; // the line the user typed
     size_t capacity = 0; // allocated size of input buffer
 
-    for(;;){ // infinite loop
+    while(1){
         printf("shellite$ ");
-        fflush(stdout); // flush output so above line shows immediately when waiting for input
 
         if(getline(&line, &capacity, stdin) == -1){
-            if(feof(stdin)){ // handles Ctrl+D that returns EOF to the terminal
+            if(feof(stdin)){ // handles Ctrl+D that returns EOF to the shell
                 break;
             }
             perror("getLine");
@@ -54,49 +55,147 @@ int main(){
         }
 
         // tokenizer
-        char *args[128];
-        size_t count = 0;
-        char *saveptr;
-        char *token = strtok_r(line, " \t\n", &saveptr);
+        char *commands[MAX_COMMANDS][MAX_ARGS]; // hold full commands eg "printf hello"
+        int arg_counts[MAX_COMMANDS] = {0}; // hold arguemnets of commands eg "printf", "hello"
+        int command_count = 1; // number of commands separated by pipeline |
+
+        char *token = strtok(line, " \t\n");
+        int invalid = 0;
 
         // add NULL at the end of last valid token
-        while(token != NULL && count < 127){
-            args[count++] = token;
-            token = strtok_r(NULL, " \t\n", &saveptr);
+        while(token != NULL){
+            if(strcmp(token, "|") == 0){
+                // handle empty "|" or is max command is reached
+                if(arg_counts[command_count - 1] == 0 || command_count == MAX_COMMANDS){
+                    invalid = 1;
+                    break;
+                }
+                command_count++;
+            }else{
+                int current = command_count - 1;
+    
+                if(arg_counts[current] >= MAX_ARGS - 1){
+                    printf("too many arguements\n");
+                    invalid = 1;
+                    break;
+                }
+                commands[current][arg_counts[current]++] = token;
+            }
+            token = strtok(NULL, " \t\n");
         }
-        args[count] = NULL;
+
+        // invalid command
+        if(invalid){
+            printf("invalid command\n");
+            continue;
+        }
 
         // handle empty input
-        if(count == 0){
+        if(arg_counts[0]==0){
             continue;
+        }
+
+        // reject empty pipeline
+        if(arg_counts[command_count - 1] == 0){
+            printf("invalid pipeline\n");
+            continue;
+        }
+        
+        // init end of command[i] to be NULL
+        for(int i =0; i < command_count; i++){
+            commands[i][arg_counts[i]] = NULL;
         }
 
         // use built in command if available
-        if(run_builtin(args)){
+        if(command_count == 1 && run_builtin(commands[0])){
             continue;
         }
 
-        // spawn child process that will run programs like ls, pwd, grep etc.
-        pid_t pid = fork();
-        if(pid == -1){
-            perror("fork");
-            continue;
-        }
+        // spawn child process that will run external programs like ls, pwd, grep etc.
+        pid_t pids[MAX_COMMANDS];
+        int started = 0; // children created
+        int previous_read = -1; // previous pipe read
+        int failed = 0; // failed children
 
-        if(pid == 0){
-            execvp(args[0], args); // handles external shell commands like ls,pwd etc by searching PATH for it
-            perror(args[0]); // return error if execvp couldnt find the command
-            _exit(127); // 127 is standard error status for "command nor found"
-        }
-        
-        // waits for child process to complete command
-        int status;
-        while(waitpid(pid, &status, 0) == -1){
-            if(errno != EINTR){
-                perror("waitpid");
+        for(int i = 0;i < command_count;i++){
+            int pipe_fds[2] = {-1, -1}; // pipe_fds[0] == pipe to read from, pipe_fds[1] == pipe to write to
+
+            // only create a pipe if there are multiple commands
+            if(i < command_count - 1 && pipe(pipe_fds) == -1){
+                perror("pipe");
+                failed = 1;
                 break;
             }
+
+            pid_t pid = fork();
+
+            // exit and clean pipes
+            if(pid == -1){
+                perror("fork");
+                if(pipe_fds[0] != -1)
+                    close(pipe_fds[0]);
+                if(pipe_fds[1] != -1)
+                    close(pipe_fds[1]);
+                
+                failed = 1;
+                break;
+            }
+
+            if(pid == 0){
+                if(previous_read != -1){
+                    // set old file descriptor to 1
+                    if(dup2(previous_read, STDIN_FILENO) == -1){
+                        perror("dup2");
+                        _exit(1);
+                    }
+                }
+
+                if(pipe_fds[1] != -1){
+                    if(dup2(pipe_fds[1], STDOUT_FILENO) == -1){
+                        perror("dup2");
+                        _exit(1);
+                    }
+                }
+
+                if (previous_read != -1)
+                    close(previous_read);
+                if (pipe_fds[0] != -1)
+                    close(pipe_fds[0]);
+                if (pipe_fds[1] != -1)
+                    close(pipe_fds[1]);
+
+                execvp(commands[i][0], commands[i]); // run command if available in PATH. only returns if failed
+                perror(commands[i][0]);
+                _exit(127); // standard code for command failure
+            }
+
+            // save pid of child
+            pids[started++] = pid;
+
+            if(previous_read != -1){
+                close(previous_read);
+            }
+
+            if(pipe_fds[1] != -1){
+                close(pipe_fds[1]);
+            }
+
+            previous_read = pipe_fds[0];
         }
+
+        if(previous_read != -1){
+            close(previous_read);
+        }
+
+        for(int i = 0; i < started; i++){
+            while(waitpid(pids[i], NULL, 0) == -1){
+                if(errno != EINTR){
+                    perror("waitpid");
+                    break;
+                }
+            }
+        }
+        (void)failed;
     }
 
     // free line and move to next line after output
