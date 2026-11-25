@@ -20,6 +20,7 @@ typedef struct {
 job jobs[MAX_JOBS];
 int jcount = 0;
 
+// read input from user
 int read_input(char **line, size_t *capacity){
     printf("shellite$ ");
 
@@ -30,6 +31,7 @@ int read_input(char **line, size_t *capacity){
     return 1;
 }
 
+// create a string array to hold commands and their arguements
 int tokenize(char *line, char *commands[][MAX_ARGS]){
     int cmd = 0;
     int arg = 0;
@@ -86,7 +88,7 @@ void kill_job(int id){
     for(int i=0;i<MAX_JOBS;i++){
         if(jobs[i].id == id && jobs[i].active == 1){
             if(kill(jobs[i].pid, SIGTERM) == -1){
-                perror("kill");
+                perror("kill\n");
             }
             return;
         }
@@ -94,6 +96,7 @@ void kill_job(int id){
     printf("job not found");
 }
 
+// run built in commands the parent must handle
 int run_builtin(char **args){
     // exit command
     if(strcmp(args[0], "exit") == 0){
@@ -117,12 +120,19 @@ int run_builtin(char **args){
         return 1;
     }
 
+    // show currently running jobs
     if(strcmp(args[0], "jobs") == 0){
         show_jobs();
         return 1;
     }
 
+    // kill jobs with specified id
     if(strcmp(args[0], "kill") == 0){
+        if(args[1] == NULL){
+            printf("kill cannot be empty\n");
+            return 1;
+        }
+
         int id = atoi(args[1]);
         kill_job(id);
         return 1;
@@ -130,6 +140,7 @@ int run_builtin(char **args){
     return 0;
 }
 
+// execute single commands either in foreground or background
 void exec_commands(char **args, int background){
     pid_t pid = fork();
     if(pid==-1){
@@ -160,6 +171,7 @@ void exec_commands(char **args, int background){
     }
 }
 
+// execute commands connected by pipes
 void exec_pipelines(int cmd_count, char *commands[][MAX_ARGS]){
     int prev_read = -1;
     pid_t pids[MAX_COMMANDS];
