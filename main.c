@@ -1,15 +1,24 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <signal.h>
 
 #define MAX_COMMANDS 16
 #define MAX_ARGS 128
+#define MAX_JOBS 10
+
+typedef struct {
+    int id;
+    pid_t pid;
+    int active;
+}job;
+job jobs[MAX_JOBS];
+int jcount = 0;
 
 int read_input(char **line, size_t *capacity){
     printf("shellite$ ");
@@ -58,6 +67,33 @@ int tokenize(char *line, char *commands[][MAX_ARGS]){
     return cmd+1;
 }
 
+void show_jobs(){
+    for(int i=0;i<MAX_JOBS;i++){
+        if(jobs[i].active == 0){
+            continue;
+        }
+
+        int status = waitpid(jobs[i].pid,NULL,WNOHANG);
+        if(status==0){
+            printf("[%d] PID: %d\n",jobs[i].id,jobs[i].pid);
+        }else{
+            jobs[i].active = 0;
+        }
+    }
+}
+
+void kill_job(int id){
+    for(int i=0;i<MAX_JOBS;i++){
+        if(jobs[i].id == id && jobs[i].active == 1){
+            if(kill(jobs[i].pid, SIGTERM) == -1){
+                perror("kill");
+            }
+            return;
+        }
+    }
+    printf("job not found");
+}
+
 int run_builtin(char **args){
     // exit command
     if(strcmp(args[0], "exit") == 0){
@@ -80,20 +116,47 @@ int run_builtin(char **args){
 
         return 1;
     }
+
+    if(strcmp(args[0], "jobs") == 0){
+        show_jobs();
+        return 1;
+    }
+
+    if(strcmp(args[0], "kill") == 0){
+        int id = atoi(args[1]);
+        kill_job(id);
+        return 1;
+    }
     return 0;
 }
 
-void exec_commands(char **args){
+void exec_commands(char **args, int background){
     pid_t pid = fork();
     if(pid==-1){
         perror("fork");
     }else if(pid==0){
+        signal(SIGINT, SIG_DFL);
+
         execvp(args[0], args);
         perror(args[0]);
         _exit(127);
     }else{
-        waitpid(pid, NULL, 0);
-        return;
+        if(!background){
+            waitpid(pid, NULL, 0);
+        }else{
+            int available = -1;
+            for(int i=0;i<MAX_JOBS;i++){
+                if(jobs[i].active == 0){
+                    available = i;
+                    break;
+                }
+            }
+            if(available!=-1){
+                jobs[available].id = jcount++;
+                jobs[available].pid = pid;
+                jobs[available].active = 1;
+            }
+        }
     }
 }
 
@@ -112,6 +175,8 @@ void exec_pipelines(int cmd_count, char *commands[][MAX_ARGS]){
             perror("fork");
             break;
         }else if(pid==0){
+            signal(SIGINT,SIG_DFL);
+
             if(prev_read!=-1){
                 dup2(prev_read, STDIN_FILENO);
             }
@@ -126,6 +191,7 @@ void exec_pipelines(int cmd_count, char *commands[][MAX_ARGS]){
             
             close(fd[1]);
             close(fd[0]);
+
             execvp(commands[i][0], commands[i]);
             perror(commands[i][0]);
             _exit(127);
@@ -145,13 +211,14 @@ void exec_pipelines(int cmd_count, char *commands[][MAX_ARGS]){
 }
 
 int main(void) {
+    signal(SIGINT, SIG_IGN);
     char *line = NULL;
     size_t capacity = 0;
 
     char* commands[MAX_COMMANDS][MAX_ARGS];
     int command_count;
 
-    while (1) {
+    while(1){
         if(read_input(&line, &capacity) == 0){
             printf("error or EOF encountered. exiting...");
             break;
@@ -166,8 +233,18 @@ int main(void) {
             continue;
         }
 
+        int length = 0;
+        while(commands[0][length] != NULL){
+            length++;
+        }
+
         if(command_count==1){
-            exec_commands(commands[0]);
+            if(strcmp(commands[0][length-1],"&") == 0){
+                commands[0][length-1] = NULL;
+                exec_commands(commands[0],1);
+            }else{
+                exec_commands(commands[0],0);
+            }
         }else{
             exec_pipelines(command_count, commands);
         }
