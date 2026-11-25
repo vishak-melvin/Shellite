@@ -49,6 +49,6 @@ exit
 ## Limitations
 
 - Maximum of 16 commands per pipeline.
-- Maximum of 127 command tokens per command.
+- Maximum of 127 arguements per command.
 - Maximum of 10 tracked background jobs.
 - Limited command parsing and job control.
